@@ -3,8 +3,45 @@ import threading
 import time
 import logging
 import os
-from kernel_SO import SistemaACL, GerenciadorDeRecursos, MonitorDeadlock, SistemaArquivos
+import sys
+from datetime import datetime
+from kernel_so import SistemaACL, GerenciadorDeRecursos, MonitorDeadlock, SistemaArquivos
 from gerador_testes import GeradorCasosTeste
+
+PASTA_RESULTADOS = "resultados_execucao"
+os.makedirs(PASTA_RESULTADOS, exist_ok=True)
+
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+ARQUIVO_SAIDA = os.path.join(PASTA_RESULTADOS, f"execucao_{timestamp}.txt")
+
+class TeeConsoleParaArquivo:
+    def __init__(self, terminal, arquivo):
+        self.terminal = terminal
+        self.arquivo = arquivo
+        
+    def write(self, mensagem):
+        self.terminal.write(mensagem)
+        self.arquivo.write(mensagem)
+        self.arquivo.flush()
+        
+    def flush(self):
+        self.terminal.flush()
+        self.arquivo.flush()
+
+arquivo_log = open(ARQUIVO_SAIDA, "w", encoding="utf-8")
+sys.stdout = TeeConsoleParaArquivo(sys.stdout, arquivo_log)
+
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(relativeCreated)05d ms] [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler(ARQUIVO_SAIDA, mode='a', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 def executar_processo_simulado(dados_proc, gerenciador):
     nome, usuario, passos = dados_proc["nome"], dados_proc["usuario"], dados_proc["passos"]
@@ -78,6 +115,7 @@ def rodar_simulacao(cenarios):
     print(f" -> Tempo Total de Espera em Lock: {t_espera:.4f}s")
     print(f" -> Tempo Médio de Espera por Acesso: {espera_media:.4f}s")
     print("#"*50 + "\n")
+    print(f"[+] Todos os logs e o relatório foram salvos em: {ARQUIVO_SAIDA}\n")
 
 def menu_principal():
     print("\n=== SIMULADOR DE SO (ACL & DEADLOCKS) ===")

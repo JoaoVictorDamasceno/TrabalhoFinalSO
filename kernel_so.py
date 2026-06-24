@@ -1,32 +1,54 @@
 import threading
-import logging
 import time
+import logging
+from collections import defaultdict
 
-logging.basicConfig(level=logging.INFO, format='[%(relativeCreated)05d ms] [%(levelname)s]%(message)s')
+logging.basicConfig(level=logging.INFO, format='[%(relativeCreated)05d ms] [%(levelname)s] %(message)s')
+
+class SistemaArquivos:
+    def __init__(self):
+        self.arquivos = {}
+        
+    def ler(self, nome):
+        return self.arquivos.get(nome, None)
+    
+    def escrever(self, nome, conteudo):
+        self.arquivos[nome] = conteudo
+        return True
 
 class SistemaACL:
     def __init__(self, regras_iniciais):
         self.regras = regras_iniciais
-
+        self.grupos = {"gerencia": ["admin", "supervisor"], "operacional": ["sistema", "estagiario"]}
+        
     def validar(self, usuario, arquivo, modo):
-        permissoes = self.regras.get(arquivo, {}).get(usuario, [])
-        return modo in permissoes
-    
+        if arquivo not in self.regras: return False
+        
+        # Permissão direta
+        if modo in self.regras[arquivo].get(usuario, []): return True
+        
+        # Permissão via grupo
+        for grupo, membros in self.grupos.items():
+            if usuario in membros:
+                for membro in membros:
+                    if modo in self.regras[arquivo].get(membro, []): return True
+        return False
+
 class GerenciadorDeRecursos:
-    def __init__(self, acl):
+    def __init__(self, acl, sistema_arquivos):
         self.acl = acl
+        self.fs = sistema_arquivos
         self.locks = {}
-        self.alocados = {}
+        self.alocados = defaultdict(set)
         self.esperando = {}
         self.lock_so = threading.Lock()
-        self.metricas = {"acessos_negados": 0, "deadlocks_resolvidos": 0, "tempo_espera_total": 0}
+        
+        self.metricas = {
+            "total_acessos": 0, "permitidos": 0, "negados": 0,
+            "deadlocks": 0, "abortados": 0, "espera_total": 0.0,
+            "concluidos": 0, "falhos": 0
+        }
 
-    def registrar_processo(self, nome_processo):
-        with self.lock_so:
-            if nome_processo not in self.alocados:
-                self.alocados[nome_processo] = set()
-                self.esperando[nome_processo] = None
-                
     def solicitar_bloqueio(self, processo, usuario, arquivo, modo):
         with self.lock_so:
             self.metricas["total_acessos"] += 1
@@ -83,55 +105,41 @@ class MonitorDeadlock(threading.Thread):
 
     def run(self):
         while self.ativo:
-            time.sleep(1.0) 
+            time.sleep(1.0)
             self.analisar_e_resolver()
 
     def analisar_e_resolver(self):
         with self.gerenciador.lock_so:
             grafo = {}
-            dono_do_arquivo = {}
-            
-            for proc, arquivos in self.gerenciador.alocados.items():
-                for arq in arquivos: dono_do_arquivo[arq] = proc
-
+            dono = {arq: proc for proc, arqs in self.gerenciador.alocados.items() for arq in arqs}
             for proc, arq_desejado in self.gerenciador.esperando.items():
-                if arq_desejado and arq_desejado in dono_do_arquivo:
-                    grafo[proc] = dono_do_arquivo[arq_desejado]
-            
-            visitados, pilha = set(), set()
-            ciclo_encontrado = []
+                if arq_desejado in dono: grafo[proc] = dono[arq_desejado]
 
-            def dfs(nodo, caminho_atual):
-                visitados.add(nodo)
-                pilha.add(nodo)
-                caminho_atual.append(nodo)
-                
+            visitados, pilha, ciclo = set(), set(), []
+
+            def dfs(nodo, caminho):
+                visitados.add(nodo); pilha.add(nodo); caminho.append(nodo)
                 vizinho = grafo.get(nodo)
                 if vizinho:
-                    if vizinho not in visitados:
-                        if dfs(vizinho, caminho_atual): return True
+                    if vizinho not in visitados and dfs(vizinho, caminho): return True
                     elif vizinho in pilha:
-                        idx = caminho_atual.index(vizinho)
-                        ciclo_encontrado.extend(caminho_atual[idx:])
+                        ciclo.extend(caminho[caminho.index(vizinho):])
                         return True
-                
-                pilha.remove(nodo)
-                caminho_atual.pop()
+                pilha.remove(nodo); caminho.pop()
                 return False
 
             for no in list(grafo.keys()):
-                if no not in visitados:
-                    if dfs(no, []):
-                        self.gerenciador.metricas["deadlocks_resolvidos"] += 1
-                        logging.error(f"DEADLOCK: {' -> '.join(ciclo_encontrado)} -> {ciclo_encontrado[0]}")
-                        
-                        vitima = ciclo_encontrado[-1]
-                        logging.warning(f"VITIMA ESCOLHIDA: Abortando '{vitima}'.")
-                        
-                        arquivos_vitima = list(self.gerenciador.alocados[vitima])
-                        for arq in arquivos_vitima:
-                            self.gerenciador.locks[arq].release()
-                        
-                        del self.gerenciador.alocados[vitima]
-                        del self.gerenciador.esperando[vitima]
-                        break
+                if no not in visitados and dfs(no, []):
+                    self.gerenciador.metricas["deadlocks"] += 1
+                    logging.error(f"DEADLOCK DETECTADO! Ciclo: {' -> '.join(ciclo)} -> {ciclo[0]}")
+                    
+                    vitima = ciclo[-1]
+                    logging.warning(f"SO RESOLVENDO: Abortando '{vitima}'")
+                    
+                    for arq in list(self.gerenciador.alocados[vitima]):
+                        self.gerenciador.locks[arq].release()
+                    
+                    del self.gerenciador.alocados[vitima]
+                    del self.gerenciador.esperando[vitima]
+                    self.gerenciador.metricas["abortados"] += 1
+                    break
