@@ -1,85 +1,89 @@
-"""
-gerador_testes.py
-------------------
-Gera cenarios de teste aleatorios (ACL + processos concorrentes), no mesmo
-formato usado em casos_de_teste.json. Util para testar o sistema com
-combinacoes que nao pensamos manualmente, e para gerar casos de Deadlock
-forcado sob demanda.
-"""
-
 import json
 import random
 
 
+PAPEIS_PADRAO = ["admin", "supervisor", "estagiario", "convidado"]
+ARQUIVOS_BASE = ["relatorio.pdf", "dados.csv", "config.ini", "log.txt", "banco.db"]
+MODOS = ["R", "W"]
+
+
 class GeradorCasosTeste:
-    def __init__(self, seed=None):
+    def __init__(self, seed=None, papeis=None):
         if seed is not None:
             random.seed(seed)
-        self.usuarios = ["admin", "supervisor", "estagiario", "sistema", "convidado"]
-        self.arquivos_base = ["relatorio.pdf", "dados.csv", "config.ini", "log.txt", "banco.db"]
-        self.modos = ["R", "W"]
+        self.papeis = papeis or PAPEIS_PADRAO
+
+    def gerar_regra_acl_aleatoria(self, arquivo):
+        """Gera regras de papel (allow, e ocasionalmente deny) para um arquivo."""
+        regras_papeis = {}
+        for papel in self.papeis:
+            if random.random() < 0.6:  # nem todo papel tem regra explicita (testa heranca)
+                allow = random.sample(MODOS, random.randint(1, 2))
+                regra = {"allow": allow}
+                if random.random() < 0.2:  # 20% de chance de ter um deny tambem
+                    regra["deny"] = random.sample(MODOS, 1)
+                regras_papeis[papel] = regra
+        return {"papeis": regras_papeis}
 
     def gerar_acl_aleatoria(self, num_arquivos=3):
-        acl = {}
-        arquivos = random.sample(self.arquivos_base, min(num_arquivos, len(self.arquivos_base)))
-        for arquivo in arquivos:
-            acl[arquivo] = {}
-            usuarios_escolhidos = random.sample(self.usuarios, random.randint(1, 3))
-            for usuario in usuarios_escolhidos:
-                acl[arquivo][usuario] = random.sample(self.modos, random.randint(1, 2))
-        return acl
+        arquivos = random.sample(ARQUIVOS_BASE, min(num_arquivos, len(ARQUIVOS_BASE)))
+        return {arquivo: self.gerar_regra_acl_aleatoria(arquivo) for arquivo in arquivos}
 
-    def gerar_processo_aleatorio(self, nome, acl, num_passos=4):
+    def gerar_processo_aleatorio(self, nome, usuario, acl, num_passos=3):
         arquivos_disponiveis = list(acl.keys())
         if not arquivos_disponiveis:
             return None
 
-        usuario = random.choice(self.usuarios)
         passos = []
-
-        # Primeiro passo: sempre um 'bloquear', para garantir uso do mecanismo de lock.
         arq_inicial = random.choice(arquivos_disponiveis)
-        passos.append({"acao": "bloquear", "arquivo": arq_inicial, "modo": random.choice(self.modos)})
+        passos.append({"acao": "bloquear", "arquivo": arq_inicial, "modo": random.choice(MODOS)})
 
-        # Passos intermediarios: mistura de processar / bloquear outro arquivo.
-        for _ in range(max(0, num_passos - 2)):
-            if random.random() < 0.5:
-                passos.append({"acao": "processar", "tempo": round(random.uniform(0.1, 0.4), 2)})
-            else:
-                arq = random.choice(arquivos_disponiveis)
-                passos.append({"acao": "bloquear", "arquivo": arq, "modo": random.choice(self.modos)})
+        acao_extra = random.choice(["ler", "escrever"])
+        passos.append({
+            "acao": acao_extra, "arquivo": arq_inicial,
+            **({"conteudo": f"dado de {usuario}"} if acao_extra == "escrever" else {})
+        })
 
-        # Ultimo passo: libera um dos arquivos bloqueados (o resto e limpo no final pelo SO).
-        arquivos_bloqueados = [p["arquivo"] for p in passos if p["acao"] == "bloquear"]
-        if arquivos_bloqueados:
-            passos.append({"acao": "liberar", "arquivo": random.choice(arquivos_bloqueados)})
-
+        passos.append({"acao": "liberar", "arquivo": arq_inicial})
         return {"nome": nome, "usuario": usuario, "passos": passos}
 
     def gerar_cenario_aleatorio(self, num_processos=3, num_arquivos=3):
+        """Gera um cenario de ACL pura (sem deadlock), com usuarios de papeis variados."""
         acl = self.gerar_acl_aleatoria(num_arquivos)
-        processos = [
-            self.gerar_processo_aleatorio(f"Proc_{i}", acl)
-            for i in range(num_processos)
-        ]
+        usuarios_papel = {f"user_{i}": random.choice(self.papeis) for i in range(num_processos)}
+
+        processos = []
+        for i, (usuario, _) in enumerate(usuarios_papel.items()):
+            p = self.gerar_processo_aleatorio(f"Proc_{i}", usuario, acl)
+            if p:
+                processos.append(p)
+
         return {
-            "descricao": "Cenario concorrente aleatorio",
+            "descricao": "Cenario de ACL gerado aleatoriamente (sem deadlock).",
+            "ativar_monitor_deadlock": False,
+            "_usuario_papel_extra": usuarios_papel,  # usado por gerar_e_salvar para montar o _config_acl
             "acl": acl,
-            "processos": [p for p in processos if p is not None],
+            "processos": processos,
         }
 
     def gerar_cenario_deadlock(self):
-        """Forca um deadlock classico: A trava arq1 depois arq2; B trava arq2 depois arq1."""
-        arq1, arq2 = random.sample(self.arquivos_base, 2)
+        """Caso especial: forca um deadlock classico entre dois papeis diferentes,
+        para testar a escolha de vitima por privilegio hierarquico."""
+        arq1, arq2 = random.sample(ARQUIVOS_BASE, 2)
+        papel_alto, papel_baixo = self.papeis[0], self.papeis[-2]  # ex: admin vs estagiario
+
+        acl = {
+            arq1: {"papeis": {papel_alto: {"allow": ["R", "W"]}, papel_baixo: {"allow": ["R", "W"]}}},
+            arq2: {"papeis": {papel_alto: {"allow": ["R", "W"]}, papel_baixo: {"allow": ["R", "W"]}}},
+        }
         return {
-            "descricao": "Cenario forcado de deadlock (A->B, B->A)",
-            "acl": {
-                arq1: {"sistema": ["R", "W"]},
-                arq2: {"sistema": ["R", "W"]},
-            },
+            "descricao": f"Deadlock forcado entre papel '{papel_alto}' e '{papel_baixo}' (teste de estresse).",
+            "ativar_monitor_deadlock": True,
+            "_usuario_papel_extra": {"user_alto": papel_alto, "user_baixo": papel_baixo},
+            "acl": acl,
             "processos": [
                 {
-                    "nome": "Thread_A", "usuario": "sistema",
+                    "nome": "Thread_Alto", "usuario": "user_alto",
                     "passos": [
                         {"acao": "bloquear", "arquivo": arq1, "modo": "W"},
                         {"acao": "processar", "tempo": 0.3},
@@ -89,7 +93,7 @@ class GeradorCasosTeste:
                     ],
                 },
                 {
-                    "nome": "Thread_B", "usuario": "sistema",
+                    "nome": "Thread_Baixo", "usuario": "user_baixo",
                     "passos": [
                         {"acao": "bloquear", "arquivo": arq2, "modo": "W"},
                         {"acao": "processar", "tempo": 0.3},
@@ -101,28 +105,42 @@ class GeradorCasosTeste:
             ],
         }
 
-    def gerar_bateria(self, quantidade=6):
-        """Gera um dict de cenarios: a cada 3, um deadlock forcado; os outros, aleatorios."""
+    def gerar_bateria(self, quantidade=5, incluir_deadlock=True):
+        """Gera uma bateria majoritariamente de ACL pura. Se incluir_deadlock=True,
+        o ULTIMO cenario gerado e um deadlock forcado (caso especial, nao a regra)."""
         cenarios = {}
-        for i in range(quantidade):
-            if i % 3 == 1:
-                cenarios[f"cenario_{i+1}_deadlock_forcado"] = self.gerar_cenario_deadlock()
-            else:
-                cenarios[f"cenario_{i+1}_aleatorio"] = self.gerar_cenario_aleatorio(
-                    num_processos=random.randint(2, 4)
-                )
+        for i in range(quantidade - 1 if incluir_deadlock else quantidade):
+            cenarios[f"cenario_{i+1}_acl_aleatorio"] = self.gerar_cenario_aleatorio(
+                num_processos=random.randint(2, 4)
+            )
+        if incluir_deadlock:
+            cenarios[f"cenario_{quantidade}_deadlock_estresse"] = self.gerar_cenario_deadlock()
         return cenarios
 
 
-def gerar_e_salvar(quantidade=6, arquivo_saida="casos_de_teste_aleatorios.json"):
-    """Gera uma bateria de testes aleatorios e salva em um JSON separado,
-    para nao sobrescrever os casos fixos em casos_de_teste.json."""
+def gerar_e_salvar(quantidade=5, arquivo_saida="casos_de_teste_aleatorios.json"):
+    """Gera uma bateria aleatoria completa, incluindo o bloco '_config_acl'
+    com a hierarquia de papeis e o mapeamento usuario->papel consolidado.
+    Salva em arquivo separado, sem sobrescrever casos_de_teste.json."""
     gerador = GeradorCasosTeste()
     cenarios = gerador.gerar_bateria(quantidade)
+
+    usuario_papel_consolidado = {}
+    for config in cenarios.values():
+        usuario_papel_consolidado.update(config.pop("_usuario_papel_extra"))
+
+    saida = {
+        "_config_acl": {
+            "hierarquia_papeis": PAPEIS_PADRAO,
+            "usuario_papel": usuario_papel_consolidado,
+        },
+        **cenarios,
+    }
+
     with open(arquivo_saida, "w", encoding="utf-8") as f:
-        json.dump(cenarios, f, indent=2, ensure_ascii=False)
-    print(f"{quantidade} cenarios aleatorios salvos em '{arquivo_saida}'.")
-    return cenarios
+        json.dump(saida, f, indent=2, ensure_ascii=False)
+    print(f"{quantidade} cenarios salvos em '{arquivo_saida}'.")
+    return saida
 
 
 if __name__ == "__main__":
