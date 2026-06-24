@@ -3,22 +3,28 @@ import threading
 import time
 import logging
 
-from sistema_arquivos import SistemaArquivos, PermissaoNegadaError
+from acl import SistemaACL, HierarquiaDePapeis, PermissaoNegadaError
+from sistema_arquivos import SistemaArquivos
 from kernel_so import GerenciadorDeRecursos, MonitorDeadlock
-from gerador_testes import GeradorCasosTeste
 
 
-def executar_processo_simulado(dados_proc, gerenciador):
-    # Executa, em uma thread, a sequencia de passos de um processo.
+def montar_acl(config_cenario, config_global):
+    """Cria a SistemaACL para um cenario, usando a hierarquia de papeis
+    e o mapeamento usuario->papel definidos em '_config_acl' do JSON."""
+    hierarquia = HierarquiaDePapeis(config_global["hierarquia_papeis"])
+    usuario_papel = config_global["usuario_papel"]
+    return SistemaACL(config_cenario["acl"], hierarquia, usuario_papel)
+
+
+def executar_processo_simulado(dados_proc, gerenciador, usuario_do_processo):
     nome = dados_proc["nome"]
     usuario = dados_proc["usuario"]
     passos = dados_proc["passos"]
 
-    gerenciador.registrar_processo(nome, usuario)
+    usuario_do_processo[nome] = usuario
+    gerenciador.registrar_processo(nome)
 
     for passo in passos:
-        # Se o processo foi removido das estruturas do gerenciador, ele foi
-        # abortado pelo MonitorDeadlock enquanto executava um passo anterior.
         with gerenciador.lock_so:
             if not gerenciador._processo_ativo(nome):
                 logging.info(f"'{nome}' encerrado: foi vitima de deadlock.")
@@ -57,16 +63,25 @@ def executar_processo_simulado(dados_proc, gerenciador):
         gerenciador.metricas["concluidos"] += 1
 
 
-def rodar_cenario(nome_cenario, config):
-    print(f"\n{'='*60}\nCENARIO: {nome_cenario}\n  {config.get('descricao', '')}\n{'='*60}")
+def rodar_cenario(nome_cenario, config, config_global):
+    ativa_deadlock = config.get("ativar_monitor_deadlock", False)
+    print(f"\n{'='*70}\nCENARIO: {nome_cenario}")
+    print(f"  {config.get('descricao', '')}")
+    print(f"  [Monitor de Deadlock: {'ATIVO' if ativa_deadlock else 'desativado -- cenario de ACL pura'}]")
+    print('=' * 70)
 
-    fs = SistemaArquivos(config["acl"])
-    gerenciador = GerenciadorDeRecursos(fs)
-    monitor = MonitorDeadlock(gerenciador)
-    monitor.start()
+    acl = montar_acl(config, config_global)
+    fs = SistemaArquivos(acl)
+    gerenciador = GerenciadorDeRecursos(acl, fs)
+
+    usuario_do_processo = {}
+    monitor = None
+    if ativa_deadlock:
+        monitor = MonitorDeadlock(gerenciador, usuario_do_processo)
+        monitor.start()
 
     threads = [
-        threading.Thread(target=executar_processo_simulado, args=(p, gerenciador))
+        threading.Thread(target=executar_processo_simulado, args=(p, gerenciador, usuario_do_processo))
         for p in config["processos"]
     ]
     for t in threads:
@@ -74,60 +89,61 @@ def rodar_cenario(nome_cenario, config):
     for t in threads:
         t.join()
 
-    monitor.ativo = False
-    monitor.join()
+    if monitor:
+        monitor.ativo = False
+        monitor.join()
 
     m = gerenciador.metricas
+    aud = acl.estatisticas_auditoria()
+
     print(f"\n--- RELATORIO: {nome_cenario} ---")
-    print(f"  Acessos solicitados : {m['total_acessos']}")
-    print(f"  Negados pela ACL    : {m['negados_acl']}")
-    print(f"  Deadlocks resolvidos: {m['deadlocks_resolvidos']}")
-    print(f"  Processos concluidos: {m['concluidos']}")
-    print(f"  Processos abortados : {m['abortados_deadlock']}")
-    print(f"  Tempo total de espera em lock: {m['tempo_espera_total']:.3f}s\n")
+    print(f"  [ACL] Consultas de permissao : {aud['total_consultas']}")
+    print(f"  [ACL] Permitidos             : {aud['permitidos']}")
+    print(f"  [ACL] Negados                : {aud['negados']}")
+    if aud["motivos_negacao"]:
+        print(f"  [ACL] Motivos de negacao     : {aud['motivos_negacao']}")
+    print(f"  [Concorrencia] Processos concluidos : {m['concluidos']}")
+    print(f"  [Concorrencia] Deadlocks resolvidos  : {m['deadlocks_resolvidos']}")
+    print(f"  [Concorrencia] Processos abortados   : {m['abortados_deadlock']}")
+    print(f"  [Concorrencia] Tempo total de espera : {m['tempo_espera_total']:.3f}s\n")
 
-    return m
+    return {"metricas": m, "auditoria": aud}
 
 
-def rodar_bateria(cenarios):
-    # Roda varios cenarios em sequencia e imprime um resumo consolidado ao final.
+def rodar_bateria(cenarios, config_global):
     resultados = {}
     for nome, config in cenarios.items():
-        resultados[nome] = rodar_cenario(nome, config)
-        time.sleep(0.3)  # pequena pausa para nao misturar logs de cenarios diferentes
+        resultados[nome] = rodar_cenario(nome, config, config_global)
+        time.sleep(0.3)
 
-    total = {
-        "total_acessos": sum(m["total_acessos"] for m in resultados.values()),
-        "negados_acl": sum(m["negados_acl"] for m in resultados.values()),
-        "deadlocks_resolvidos": sum(m["deadlocks_resolvidos"] for m in resultados.values()),
-        "concluidos": sum(m["concluidos"] for m in resultados.values()),
-        "abortados_deadlock": sum(m["abortados_deadlock"] for m in resultados.values()),
-        "tempo_espera_total": sum(m["tempo_espera_total"] for m in resultados.values()),
-    }
-    print(f"\n{'#'*60}\nRESUMO CONSOLIDADO ({len(resultados)} cenarios)\n{'#'*60}")
-    for chave, valor in total.items():
-        print(f"  {chave}: {valor:.3f}" if isinstance(valor, float) else f"  {chave}: {valor}")
+    total_consultas = sum(r["auditoria"]["total_consultas"] for r in resultados.values())
+    total_permitidos = sum(r["auditoria"]["permitidos"] for r in resultados.values())
+    total_negados = sum(r["auditoria"]["negados"] for r in resultados.values())
+    total_deadlocks = sum(r["metricas"]["deadlocks_resolvidos"] for r in resultados.values())
+    total_concluidos = sum(r["metricas"]["concluidos"] for r in resultados.values())
+
+    print(f"\n{'#'*70}\nRESUMO CONSOLIDADO ({len(resultados)} cenarios)\n{'#'*70}")
+    print(f"  Total de consultas a ACL : {total_consultas}")
+    print(f"  Permitidos pela ACL      : {total_permitidos}")
+    print(f"  Negados pela ACL         : {total_negados}")
+    taxa = (total_negados / total_consultas * 100) if total_consultas else 0
+    print(f"  Taxa de negacao da ACL   : {taxa:.1f}%")
+    print(f"  Processos concluidos     : {total_concluidos}")
+    print(f"  Deadlocks resolvidos     : {total_deadlocks} (esperado: baixo, e so teste de estresse)")
     print()
 
 
 def menu_principal():
-    print("\n=== SIMULADOR DE SO: ACL + SISTEMA DE ARQUIVOS + DEADLOCK ===")
-    print("1. Rodar cenarios fixos (casos_de_teste.json)")
-    print("2. Gerar e rodar cenarios aleatorios")
-    escolha = input("Escolha uma opcao (1 ou 2): ").strip()
+    import sys
+    arquivo = sys.argv[1] if len(sys.argv) > 1 else "casos_de_teste.json"
 
-    if escolha == "1":
-        with open("casos_de_teste.json", "r", encoding="utf-8") as f:
-            cenarios = json.load(f)
-    elif escolha == "2":
-        qtd = input("Quantos cenarios aleatorios gerar? [padrao=4]: ").strip()
-        qtd = int(qtd) if qtd.isdigit() else 4
-        cenarios = GeradorCasosTeste().gerar_bateria(qtd)
-    else:
-        print("Opcao invalida. Encerrando.")
-        return
+    print("\n=== SIMULADOR DE GERENCIADOR DE PERMISSOES (ACL) ===")
+    print(f"Carregando cenarios de: {arquivo}")
+    with open(arquivo, "r", encoding="utf-8") as f:
+        dados = json.load(f)
 
-    rodar_bateria(cenarios)
+    config_global = dados.pop("_config_acl")
+    rodar_bateria(dados, config_global)
 
 
 if __name__ == "__main__":
