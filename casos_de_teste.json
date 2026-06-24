@@ -1,52 +1,132 @@
 {
   "cenario_1_sucesso": {
-    "descricao": "Execucao limpa. Processos respeitam a ACL e nao geram Deadlock.",
+    "descricao": "Execucao limpa. Processos respeitam a ACL e nao geram deadlock.",
     "acl": {
-      "relatorio.pdf": {"admin": ["R", "W"], "estagiario": ["R"]}
+      "relatorio.pdf": { "admin": ["R", "W"], "estagiario": ["R"] }
     },
     "processos": [
       {
-        "nome": "P1_Admin", "usuario": "admin",
+        "nome": "P1_Admin",
+        "usuario": "admin",
         "passos": [
-          {"acao": "bloquear", "arquivo": "relatorio.pdf", "modo": "W"},
-          {"acao": "processar", "tempo": 1.0},
-          {"acao": "liberar", "arquivo": "relatorio.pdf"}
+          { "acao": "bloquear", "arquivo": "relatorio.pdf", "modo": "W" },
+          {
+            "acao": "escrever",
+            "arquivo": "relatorio.pdf",
+            "conteudo": "Relatorio revisado pelo admin."
+          },
+          { "acao": "liberar", "arquivo": "relatorio.pdf" }
         ]
       },
       {
-        "nome": "P2_Estagiario", "usuario": "estagiario",
+        "nome": "P2_Estagiario",
+        "usuario": "estagiario",
         "passos": [
-          {"acao": "bloquear", "arquivo": "relatorio.pdf", "modo": "R"},
-          {"acao": "liberar", "arquivo": "relatorio.pdf"}
+          { "acao": "bloquear", "arquivo": "relatorio.pdf", "modo": "R" },
+          { "acao": "ler", "arquivo": "relatorio.pdf" },
+          { "acao": "liberar", "arquivo": "relatorio.pdf" }
         ]
       }
     ]
   },
-  "cenario_2_deadlock_resolvido": {
-    "descricao": "Gera um Deadlock classico (A espera B, B espera A). O SO deve abortar um deles.",
+
+  "cenario_2_acl_nega_acesso": {
+    "descricao": "Estagiario tenta escrever em arquivo que so admin pode escrever. ACL deve negar.",
     "acl": {
-      "db_clientes.dat": {"sistema": ["R", "W"]},
-      "db_vendas.dat": {"sistema": ["R", "W"]}
+      "config.ini": { "admin": ["R", "W"], "estagiario": ["R"] }
     },
     "processos": [
       {
-        "nome": "Thread_Sync_A", "usuario": "sistema",
+        "nome": "P1_Estagiario_Tenta_Escrever",
+        "usuario": "estagiario",
         "passos": [
-          {"acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W"},
-          {"acao": "processar", "tempo": 0.5},
-          {"acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "W"},
-          {"acao": "liberar", "arquivo": "db_clientes.dat"},
-          {"acao": "liberar", "arquivo": "db_vendas.dat"}
+          { "acao": "bloquear", "arquivo": "config.ini", "modo": "W" },
+          { "acao": "liberar", "arquivo": "config.ini" }
+        ]
+      }
+    ]
+  },
+
+  "cenario_3_deadlock_resolvido_por_privilegio": {
+    "descricao": "Deadlock classico (A espera B, B espera A) entre usuarios de privilegios diferentes. O processo de menor privilegio na ACL deve ser a vitima escolhida.",
+    "acl": {
+      "db_clientes.dat": { "admin": ["R", "W"], "estagiario": ["R", "W"] },
+      "db_vendas.dat": { "admin": ["R", "W"], "estagiario": ["R"] }
+    },
+    "processos": [
+      {
+        "nome": "Thread_Admin",
+        "usuario": "admin",
+        "passos": [
+          { "acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W" },
+          { "acao": "processar", "tempo": 0.5 },
+          { "acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "W" },
+          { "acao": "liberar", "arquivo": "db_clientes.dat" },
+          { "acao": "liberar", "arquivo": "db_vendas.dat" }
         ]
       },
       {
-        "nome": "Thread_Sync_B", "usuario": "sistema",
+        "nome": "Thread_Estagiario",
+        "usuario": "estagiario",
         "passos": [
-          {"acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "W"},
-          {"acao": "processar", "tempo": 0.5},
-          {"acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W"},
-          {"acao": "liberar", "arquivo": "db_vendas.dat"},
-          {"acao": "liberar", "arquivo": "db_clientes.dat"}
+          { "acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "R" },
+          { "acao": "processar", "tempo": 0.5 },
+          { "acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W" },
+          { "acao": "liberar", "arquivo": "db_vendas.dat" },
+          { "acao": "liberar", "arquivo": "db_clientes.dat" }
+        ]
+      }
+    ]
+  },
+
+  "cenario_4_tres_processos_um_arquivo": {
+    "descricao": "Tres processos disputam o mesmo arquivo em modo escrita, sem ciclo de espera (apenas fila pelo lock).",
+    "acl": {
+      "log.txt": {
+        "sistema": ["R", "W"],
+        "admin": ["R", "W"],
+        "supervisor": ["R", "W"]
+      }
+    },
+    "processos": [
+      {
+        "nome": "P1_Sistema",
+        "usuario": "sistema",
+        "passos": [
+          { "acao": "bloquear", "arquivo": "log.txt", "modo": "W" },
+          {
+            "acao": "escrever",
+            "arquivo": "log.txt",
+            "conteudo": "linha do sistema"
+          },
+          { "acao": "processar", "tempo": 0.3 },
+          { "acao": "liberar", "arquivo": "log.txt" }
+        ]
+      },
+      {
+        "nome": "P2_Admin",
+        "usuario": "admin",
+        "passos": [
+          { "acao": "bloquear", "arquivo": "log.txt", "modo": "W" },
+          {
+            "acao": "escrever",
+            "arquivo": "log.txt",
+            "conteudo": "linha do admin"
+          },
+          { "acao": "liberar", "arquivo": "log.txt" }
+        ]
+      },
+      {
+        "nome": "P3_Supervisor",
+        "usuario": "supervisor",
+        "passos": [
+          { "acao": "bloquear", "arquivo": "log.txt", "modo": "W" },
+          {
+            "acao": "escrever",
+            "arquivo": "log.txt",
+            "conteudo": "linha do supervisor"
+          },
+          { "acao": "liberar", "arquivo": "log.txt" }
         ]
       }
     ]
