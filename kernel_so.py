@@ -1,5 +1,6 @@
 import threading
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO, format='[%(relativeCreated)05d ms] [%(levelname)s]%(message)s')
 
@@ -73,3 +74,26 @@ class GerenciadorDeRecursos:
                 self.locks[arq].release()
             self.alocados.pop(processo, None)
             self.esperando.pop(processo, None)
+
+class MonitorDeadlock(threading.Thread):
+    def __init__(self, gerenciador):
+        super().__init__(daemon=True)
+        self.gerenciador = gerenciador
+        self.ativo = True
+
+    def run(self):
+        while self.ativo:
+            time.sleep(1.0) 
+            self.analisar_e_resolver()
+
+    def analisar_e_resolver(self):
+        with self.gerenciador.lock_so:
+            grafo = {}
+            dono_do_arquivo = {}
+            
+            for proc, arquivos in self.gerenciador.alocados.items():
+                for arq in arquivos: dono_do_arquivo[arq] = proc
+
+            for proc, arq_desejado in self.gerenciador.esperando.items():
+                if arq_desejado and arq_desejado in dono_do_arquivo:
+                    grafo[proc] = dono_do_arquivo[arq_desejado]
