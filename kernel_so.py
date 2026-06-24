@@ -97,3 +97,41 @@ class MonitorDeadlock(threading.Thread):
             for proc, arq_desejado in self.gerenciador.esperando.items():
                 if arq_desejado and arq_desejado in dono_do_arquivo:
                     grafo[proc] = dono_do_arquivo[arq_desejado]
+            
+            visitados, pilha = set(), set()
+            ciclo_encontrado = []
+
+            def dfs(nodo, caminho_atual):
+                visitados.add(nodo)
+                pilha.add(nodo)
+                caminho_atual.append(nodo)
+                
+                vizinho = grafo.get(nodo)
+                if vizinho:
+                    if vizinho not in visitados:
+                        if dfs(vizinho, caminho_atual): return True
+                    elif vizinho in pilha:
+                        idx = caminho_atual.index(vizinho)
+                        ciclo_encontrado.extend(caminho_atual[idx:])
+                        return True
+                
+                pilha.remove(nodo)
+                caminho_atual.pop()
+                return False
+
+            for no in list(grafo.keys()):
+                if no not in visitados:
+                    if dfs(no, []):
+                        self.gerenciador.metricas["deadlocks_resolvidos"] += 1
+                        logging.error(f"DEADLOCK: {' -> '.join(ciclo_encontrado)} -> {ciclo_encontrado[0]}")
+                        
+                        vitima = ciclo_encontrado[-1]
+                        logging.warning(f"VITIMA ESCOLHIDA: Abortando '{vitima}'.")
+                        
+                        arquivos_vitima = list(self.gerenciador.alocados[vitima])
+                        for arq in arquivos_vitima:
+                            self.gerenciador.locks[arq].release()
+                        
+                        del self.gerenciador.alocados[vitima]
+                        del self.gerenciador.esperando[vitima]
+                        break
