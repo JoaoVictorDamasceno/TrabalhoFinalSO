@@ -1,52 +1,223 @@
 {
-  "cenario_1_sucesso": {
-    "descricao": "Execucao limpa. Processos respeitam a ACL e nao geram Deadlock.",
+  "_config_acl": {
+    "hierarquia_papeis": ["admin", "supervisor", "estagiario", "convidado"],
+    "usuario_papel": {
+      "alice": "admin",
+      "bruno": "supervisor",
+      "carla": "estagiario",
+      "diego": "convidado",
+      "erica": "supervisor"
+    }
+  },
+
+  "cenario_1_heranca_de_papel": {
+    "descricao": "ACL pura, sem concorrencia. Um 'admin' deve poder ler um arquivo cuja regra so menciona 'estagiario', pois admin herda permissoes de papeis abaixo na hierarquia.",
+    "ativar_monitor_deadlock": false,
     "acl": {
-      "relatorio.pdf": {"admin": ["R", "W"], "estagiario": ["R"]}
+      "manual_operacional.txt": {
+        "papeis": {
+          "estagiario": { "allow": ["R"] }
+        }
+      }
     },
     "processos": [
       {
-        "nome": "P1_Admin", "usuario": "admin",
+        "nome": "P1_Alice_Admin",
+        "usuario": "alice",
         "passos": [
-          {"acao": "bloquear", "arquivo": "relatorio.pdf", "modo": "W"},
-          {"acao": "processar", "tempo": 1.0},
-          {"acao": "liberar", "arquivo": "relatorio.pdf"}
-        ]
-      },
-      {
-        "nome": "P2_Estagiario", "usuario": "estagiario",
-        "passos": [
-          {"acao": "bloquear", "arquivo": "relatorio.pdf", "modo": "R"},
-          {"acao": "liberar", "arquivo": "relatorio.pdf"}
+          {
+            "acao": "bloquear",
+            "arquivo": "manual_operacional.txt",
+            "modo": "R"
+          },
+          { "acao": "ler", "arquivo": "manual_operacional.txt" },
+          { "acao": "liberar", "arquivo": "manual_operacional.txt" }
         ]
       }
     ]
   },
-  "cenario_2_deadlock_resolvido": {
-    "descricao": "Gera um Deadlock classico (A espera B, B espera A). O SO deve abortar um deles.",
+
+  "cenario_2_deny_explicito_vence_heranca": {
+    "descricao": "ACL pura. 'bruno' e supervisor (acima de estagiario na hierarquia), mas ha um deny explicito de escrita para supervisores neste arquivo. O deny deve vencer mesmo com privilegio hierarquico maior.",
+    "ativar_monitor_deadlock": false,
     "acl": {
-      "db_clientes.dat": {"sistema": ["R", "W"]},
-      "db_vendas.dat": {"sistema": ["R", "W"]}
+      "folha_pagamento.csv": {
+        "papeis": {
+          "admin": { "allow": ["R", "W"] },
+          "supervisor": { "allow": ["R", "W"], "deny": ["W"] },
+          "estagiario": { "allow": [] }
+        }
+      }
     },
     "processos": [
       {
-        "nome": "Thread_Sync_A", "usuario": "sistema",
+        "nome": "P1_Bruno_Tenta_Escrever",
+        "usuario": "bruno",
         "passos": [
-          {"acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W"},
-          {"acao": "processar", "tempo": 0.5},
-          {"acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "W"},
-          {"acao": "liberar", "arquivo": "db_clientes.dat"},
-          {"acao": "liberar", "arquivo": "db_vendas.dat"}
+          { "acao": "bloquear", "arquivo": "folha_pagamento.csv", "modo": "W" },
+          { "acao": "liberar", "arquivo": "folha_pagamento.csv" }
+        ]
+      }
+    ]
+  },
+
+  "cenario_3_excecao_pontual_por_usuario": {
+    "descricao": "ACL pura. 'carla' e estagiaria (sem permissao de escrita por papel), mas recebeu uma excecao DIRETA de allow de escrita neste arquivo especifico. A regra direta do usuario deve valer.",
+    "ativar_monitor_deadlock": false,
+    "acl": {
+      "projeto_especial.txt": {
+        "papeis": {
+          "estagiario": { "allow": ["R"] }
+        },
+        "usuarios": {
+          "carla": { "allow": ["W"] }
+        }
+      }
+    },
+    "processos": [
+      {
+        "nome": "P1_Carla_Excecao",
+        "usuario": "carla",
+        "passos": [
+          {
+            "acao": "bloquear",
+            "arquivo": "projeto_especial.txt",
+            "modo": "W"
+          },
+          {
+            "acao": "escrever",
+            "arquivo": "projeto_especial.txt",
+            "conteudo": "Atualizado por carla."
+          },
+          { "acao": "liberar", "arquivo": "projeto_especial.txt" }
+        ]
+      }
+    ]
+  },
+
+  "cenario_4_fail_closed_arquivo_sem_regra": {
+    "descricao": "ACL pura. 'diego' (convidado) tenta acessar um arquivo que nao tem NENHUMA regra de ACL cadastrada. O sistema deve negar por padrao (fail-closed), mesmo sem nenhum 'deny' explicito.",
+    "ativar_monitor_deadlock": false,
+    "acl": {
+      "arquivo_sem_regras.dat": {}
+    },
+    "processos": [
+      {
+        "nome": "P1_Diego_Sem_Regra",
+        "usuario": "diego",
+        "passos": [
+          {
+            "acao": "bloquear",
+            "arquivo": "arquivo_sem_regras.dat",
+            "modo": "R"
+          },
+          { "acao": "liberar", "arquivo": "arquivo_sem_regras.dat" }
+        ]
+      }
+    ]
+  },
+
+  "cenario_5_concorrencia_sem_conflito_hierarquico": {
+    "descricao": "ACL + concorrencia leve (sem deadlock). Tres usuarios de papeis diferentes leem/escrevem o mesmo arquivo em sequencia, disputando o lock mas sem formar ciclo de espera.",
+    "ativar_monitor_deadlock": true,
+    "acl": {
+      "log_compartilhado.txt": {
+        "papeis": {
+          "admin": { "allow": ["R", "W"] },
+          "supervisor": { "allow": ["R", "W"] },
+          "estagiario": { "allow": ["R"] }
+        }
+      }
+    },
+    "processos": [
+      {
+        "nome": "P1_Alice",
+        "usuario": "alice",
+        "passos": [
+          {
+            "acao": "bloquear",
+            "arquivo": "log_compartilhado.txt",
+            "modo": "W"
+          },
+          {
+            "acao": "escrever",
+            "arquivo": "log_compartilhado.txt",
+            "conteudo": "entrada de alice"
+          },
+          { "acao": "liberar", "arquivo": "log_compartilhado.txt" }
         ]
       },
       {
-        "nome": "Thread_Sync_B", "usuario": "sistema",
+        "nome": "P2_Bruno",
+        "usuario": "bruno",
         "passos": [
-          {"acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "W"},
-          {"acao": "processar", "tempo": 0.5},
-          {"acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W"},
-          {"acao": "liberar", "arquivo": "db_vendas.dat"},
-          {"acao": "liberar", "arquivo": "db_clientes.dat"}
+          {
+            "acao": "bloquear",
+            "arquivo": "log_compartilhado.txt",
+            "modo": "W"
+          },
+          {
+            "acao": "escrever",
+            "arquivo": "log_compartilhado.txt",
+            "conteudo": "entrada de bruno"
+          },
+          { "acao": "liberar", "arquivo": "log_compartilhado.txt" }
+        ]
+      },
+      {
+        "nome": "P3_Carla",
+        "usuario": "carla",
+        "passos": [
+          {
+            "acao": "bloquear",
+            "arquivo": "log_compartilhado.txt",
+            "modo": "R"
+          },
+          { "acao": "ler", "arquivo": "log_compartilhado.txt" },
+          { "acao": "liberar", "arquivo": "log_compartilhado.txt" }
+        ]
+      }
+    ]
+  },
+
+  "cenario_6_deadlock_como_teste_de_estresse": {
+    "descricao": "TESTE DE ESTRESSE (nao e o foco do trabalho): forca um deadlock classico entre 'erica' (supervisor) e 'carla' (estagiaria) para demonstrar que o MonitorDeadlock usa a hierarquia de privilegios da ACL como criterio de resolucao, sacrificando o processo de menor privilegio.",
+    "ativar_monitor_deadlock": true,
+    "acl": {
+      "db_clientes.dat": {
+        "papeis": {
+          "supervisor": { "allow": ["R", "W"] },
+          "estagiario": { "allow": ["R", "W"] }
+        }
+      },
+      "db_vendas.dat": {
+        "papeis": {
+          "supervisor": { "allow": ["R", "W"] },
+          "estagiario": { "allow": ["R", "W"] }
+        }
+      }
+    },
+    "processos": [
+      {
+        "nome": "Thread_Erica_Supervisor",
+        "usuario": "erica",
+        "passos": [
+          { "acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W" },
+          { "acao": "processar", "tempo": 0.5 },
+          { "acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "W" },
+          { "acao": "liberar", "arquivo": "db_clientes.dat" },
+          { "acao": "liberar", "arquivo": "db_vendas.dat" }
+        ]
+      },
+      {
+        "nome": "Thread_Carla_Estagiaria",
+        "usuario": "carla",
+        "passos": [
+          { "acao": "bloquear", "arquivo": "db_vendas.dat", "modo": "W" },
+          { "acao": "processar", "tempo": 0.5 },
+          { "acao": "bloquear", "arquivo": "db_clientes.dat", "modo": "W" },
+          { "acao": "liberar", "arquivo": "db_vendas.dat" },
+          { "acao": "liberar", "arquivo": "db_clientes.dat" }
         ]
       }
     ]
