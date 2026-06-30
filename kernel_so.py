@@ -101,14 +101,14 @@ class MonitorDeadlock(threading.Thread):
             self.analisar_e_resolver()
 
     def _construir_grafo_de_espera(self):
-        g = self.gerenciador
+        gerenciador_de_recursos = self.gerenciador
         dono_do_arquivo = {}
-        for proc, arquivos in g.alocados.items():
+        for proc, arquivos in gerenciador_de_recursos.alocados.items():
             for arq in arquivos:
                 dono_do_arquivo[arq] = proc
 
         grafo = {}
-        for proc, arq_desejado in g.esperando.items():
+        for proc, arq_desejado in gerenciador_de_recursos.esperando.items():
             if arq_desejado and arq_desejado in dono_do_arquivo:
                 dono = dono_do_arquivo[arq_desejado]
                 if dono != proc:
@@ -144,7 +144,7 @@ class MonitorDeadlock(threading.Thread):
 
     def _escolher_vitima(self, ciclo):
     
-        g = self.gerenciador
+        gerenciador_de_recursos = self.gerenciador
         melhor_vitima, menor_privilegio = None, None
 
         for proc in ciclo:
@@ -152,15 +152,15 @@ class MonitorDeadlock(threading.Thread):
             if not usuario:
                 continue
           
-            privilegio = g.acl.nivel_privilegio(usuario)
+            privilegio = gerenciador_de_recursos.acl.nivel_privilegio(usuario)
             if menor_privilegio is None or privilegio < menor_privilegio:
                 menor_privilegio, melhor_vitima = privilegio, proc
 
         return melhor_vitima or ciclo[-1]
 
     def analisar_e_resolver(self):
-        g = self.gerenciador
-        with g.lock_so:
+        gerenciador_de_recursos = self.gerenciador
+        with gerenciador_de_recursos.lock_so:
             grafo = self._construir_grafo_de_espera()
             ciclo = self._encontrar_ciclo(grafo)
             if not ciclo:
@@ -175,10 +175,10 @@ class MonitorDeadlock(threading.Thread):
                 f"menor privilegio hierarquico no ciclo)."
             )
 
-            for arq in list(g.alocados.get(vitima, [])):
-                g.locks[arq].release()
+            for arq in list(gerenciador_de_recursos.alocados.get(vitima, [])):
+                gerenciador_de_recursos.locks[arq].release()
 
-            g.alocados.pop(vitima, None)
-            g.esperando.pop(vitima, None)
-            g.metricas["deadlocks_resolvidos"] += 1
-            g.metricas["abortados_deadlock"] += 1
+            gerenciador_de_recursos.alocados.pop(vitima, None)
+            gerenciador_de_recursos.esperando.pop(vitima, None)
+            gerenciador_de_recursos.metricas["deadlocks_resolvidos"] += 1
+            gerenciador_de_recursos.metricas["abortados_deadlock"] += 1
